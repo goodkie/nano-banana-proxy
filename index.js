@@ -1,7 +1,11 @@
-// index.js
-const express = require("express");
-const cors = require("cors");
-const fetch = require("node-fetch");
+// index.js  (ES Module 버전)
+// package.json 에 "type": "module" 이 있으므로 import 문법 사용
+
+import express from "express";
+import cors from "cors";
+
+// Node 18+ / 22에서는 fetch 가 기본 내장 (node-fetch 불필요)
+// 그래도 package.json 에 node-fetch가 있어도 문제는 없습니다.
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,12 +20,12 @@ if (!FAL_KEY) {
 
 app.use(
   cors({
-    origin: "*", // 필요하면 Wix 도메인으로 제한 가능
+    origin: "*", // 필요시 Wix 도메인으로 제한 가능
   })
 );
 app.use(express.json({ limit: "20mb" }));
 
-// 간단 헬스체크
+// 헬스 체크
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -31,8 +35,7 @@ app.get("/", (req, res) => {
 });
 
 /**
- * 해상도 힌트 → Fal이 허용하는 값으로 정규화
- * 허용: "1K", "2K", "4K"
+ * 해상도 힌트를 Fal이 허용하는 값(1K/2K/4K)으로 정규화
  */
 function normalizeResolution(hint) {
   const upper = (hint || "").toString().toUpperCase().trim();
@@ -86,31 +89,27 @@ app.post("/retouch", async (req, res) => {
       imageLength: imageBase64.length,
     });
 
-    // 3) Fal 엔드포인트 (edit)
+    // 3) Fal 엔드포인트
     const falUrl = "https://fal.run/fal-ai/nano-banana-pro/edit";
 
     /**
-     * � 핵심: Fal 공식 스키마에 맞춰서 body 생성
-     * Docs에 따르면 /edit input은:
+     * Fal /edit 스펙에 맞는 body
      * {
      *   "prompt": "...",
      *   "num_images": 1,
      *   "aspect_ratio": "auto",
      *   "output_format": "png",
-     *   "image_urls": ["<url-or-data-uri>"],
+     *   "image_urls": ["data:...base64..."],
      *   "resolution": "1K"
      * }
-     *
-     * image_urls 에는 http URL 뿐만 아니라 data:... base64 도 허용됩니다. :contentReference[oaicite:1]{index=1}
      */
     const falBody = {
       prompt: prompt,
       num_images: 1,
       aspect_ratio: "auto",
       output_format: "png",
-      image_urls: [imageBase64], // Data URI(base64) 그대로 전달
+      image_urls: [imageBase64], // Data URL(base64) 그대로 전달
       resolution: resolution,    // "1K" / "2K" / "4K"
-      // sync_mode: true  // 필요하면 사용 (data URI로 반환)
     };
 
     console.log("[INFO] Calling Fal endpoint:", falUrl);
@@ -119,6 +118,7 @@ app.post("/retouch", async (req, res) => {
       image_urls: ["[base64-data-uri]"],
     });
 
+    // Node 18+에서는 전역 fetch 사용 가능
     const falRes = await fetch(falUrl, {
       method: "POST",
       headers: {
@@ -151,8 +151,7 @@ app.post("/retouch", async (req, res) => {
       });
     }
 
-    // 4) 결과 이미지 URL 추출
-    // /edit API 결과 스키마: { images: [ { url, file_name, content_type } ], description: "" } :contentReference[oaicite:2]{index=2}
+    // /edit 응답: { images: [ { url, file_name, content_type } ], ... }
     const imageUrl =
       falJson.images &&
       Array.isArray(falJson.images) &&
