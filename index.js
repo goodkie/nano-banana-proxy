@@ -6,7 +6,6 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Fal API Key
 const FAL_KEY = process.env.FAL_KEY;
 
 if (!FAL_KEY) {
@@ -17,12 +16,12 @@ if (!FAL_KEY) {
 
 app.use(
   cors({
-    origin: "*", // 필요시 Wix 도메인으로 제한 가능
+    origin: "*", // 필요하면 Wix 도메인으로 제한 가능
   })
 );
 app.use(express.json({ limit: "20mb" }));
 
-// 헬스 체크
+// 간단 헬스체크
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -32,17 +31,18 @@ app.get("/", (req, res) => {
 });
 
 /**
- * 해상도 힌트를 Fal이 허용하는 값(1K/2K/4K)으로 정규화
+ * 해상도 힌트 → Fal이 허용하는 값으로 정규화
+ * 허용: "1K", "2K", "4K"
  */
 function normalizeResolution(hint) {
-  const upper = (hint || "").toString().toUpperCase().trim(); // "1K", "2K", "4K" 기대
+  const upper = (hint || "").toString().toUpperCase().trim();
   if (upper === "1K" || upper === "2K" || upper === "4K") {
     return upper;
   }
   return "1K"; // 기본값
 }
 
-// 메인 라우트
+// 메인 라우트: /retouch
 app.post("/retouch", async (req, res) => {
   try {
     if (!FAL_KEY) {
@@ -62,7 +62,7 @@ app.post("/retouch", async (req, res) => {
       });
     }
 
-    // backgroundId에 따른 프롬프트
+    // 1) backgroundId에 따른 프롬프트
     const promptMap = {
       studioSoft:
         "Retouch the uploaded portrait into a soft, clean studio look with a light gradient backdrop. Do not change the person’s face, pose, expression, or clothing. Only adjust background, lighting, and overall mood.",
@@ -76,7 +76,7 @@ app.post("/retouch", async (req, res) => {
 
     const prompt = promptMap[backgroundId] || promptMap.studioSoft;
 
-    // 해상도 정규화
+    // 2) 해상도 정규화
     const resolution = normalizeResolution(resolutionHint);
     console.log("[INFO] Normalized resolution:", resolution, "from hint:", resolutionHint);
 
@@ -86,26 +86,37 @@ app.post("/retouch", async (req, res) => {
       imageLength: imageBase64.length,
     });
 
-    // Fal endpoint (Nano Banana Pro edit)
+    // 3) Fal 엔드포인트 (edit)
     const falUrl = "https://fal.run/fal-ai/nano-banana-pro/edit";
 
-    // Fal에 보낼 body
-    // ⚠ Fal 스펙에 맞게 조정 필요: 여기서는 "input: { image_url, prompt } + resolution" 구조 사용
+    /**
+     * � 핵심: Fal 공식 스키마에 맞춰서 body 생성
+     * Docs에 따르면 /edit input은:
+     * {
+     *   "prompt": "...",
+     *   "num_images": 1,
+     *   "aspect_ratio": "auto",
+     *   "output_format": "png",
+     *   "image_urls": ["<url-or-data-uri>"],
+     *   "resolution": "1K"
+     * }
+     *
+     * image_urls 에는 http URL 뿐만 아니라 data:... base64 도 허용됩니다. :contentReference[oaicite:1]{index=1}
+     */
     const falBody = {
-      input: {
-        image_url: imageBase64, // Fal에서 base64 data URL 허용 시
-        prompt: prompt,
-      },
-      resolution: resolution, // Fal 에러에서 loc: ["body","resolution"]로 나왔으므로 루트에 둠
+      prompt: prompt,
+      num_images: 1,
+      aspect_ratio: "auto",
+      output_format: "png",
+      image_urls: [imageBase64], // Data URI(base64) 그대로 전달
+      resolution: resolution,    // "1K" / "2K" / "4K"
+      // sync_mode: true  // 필요하면 사용 (data URI로 반환)
     };
 
     console.log("[INFO] Calling Fal endpoint:", falUrl);
-    console.log("[DEBUG] Fal request body (truncated image):", {
+    console.log("[DEBUG] Fal request body (image hidden):", {
       ...falBody,
-      input: {
-        ...falBody.input,
-        image_url: "[base64-data-url]",
-      },
+      image_urls: ["[base64-data-uri]"],
     });
 
     const falRes = await fetch(falUrl, {
@@ -123,7 +134,6 @@ app.post("/retouch", async (req, res) => {
     console.log("[DEBUG] Fal response body:", falText);
 
     if (!falRes.ok) {
-      // Fal에서 4xx/5xx 반환 시 그대로 로그 전달
       return res.status(500).json({
         error: "Nano Banana Pro processing failed",
         details: falText,
@@ -141,14 +151,13 @@ app.post("/retouch", async (req, res) => {
       });
     }
 
-    // 결과 이미지 URL 찾기 (Fal 응답 스펙에 따라 조정 가능)
+    // 4) 결과 이미지 URL 추출
+    // /edit API 결과 스키마: { images: [ { url, file_name, content_type } ], description: "" } :contentReference[oaicite:2]{index=2}
     const imageUrl =
-      falJson.image_url ||
-      falJson.url ||
-      (falJson.output &&
-        Array.isArray(falJson.output) &&
-        falJson.output[0] &&
-        falJson.output[0].url);
+      falJson.images &&
+      Array.isArray(falJson.images) &&
+      falJson.images[0] &&
+      falJson.images[0].url;
 
     if (!imageUrl) {
       console.error("[ERROR] No image URL in Fal response:", falJson);
@@ -159,7 +168,6 @@ app.post("/retouch", async (req, res) => {
     }
 
     console.log("[INFO] Returning imageUrl to client:", imageUrl);
-
     return res.json({ imageUrl });
   } catch (err) {
     console.error("[UNCAUGHT ERROR] /retouch:", err);
