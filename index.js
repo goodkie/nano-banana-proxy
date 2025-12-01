@@ -1,183 +1,184 @@
-// index.js  (ES Module 버전)
-// package.json 에 "type": "module" 이 있으므로 import 문법 사용
+// index.js (CommonJS 버전)
+// ※ package.json 에 "type": "module" 이 들어있으면 제거해주세요.
 
-import express from "express";
-import cors from "cors";
-
-// Node 18+ / 22에서는 fetch 가 기본 내장 (node-fetch 불필요)
-// 그래도 package.json 에 node-fetch가 있어도 문제는 없습니다.
+const express = require("express");
+const cors = require("cors");
+const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const FAL_KEY = process.env.FAL_KEY;
+// Nano Banana Pro API 설정
+const FAL_API_URL = "https://fal.run/fal-ai/nano-banana-pro";
+const FAL_API_KEY = process.env.FAL_KEY || process.env.FAL_API_KEY;
 
-if (!FAL_KEY) {
-  console.error("[STARTUP ERROR] FAL_KEY is not set in environment variables.");
-} else {
-  console.log("[STARTUP] FAL_KEY is set (hidden).");
-}
-
+// CORS & JSON 설정
 app.use(
   cors({
-    origin: "*", // 필요시 Wix 도메인으로 제한 가능
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "10mb" }));
 
-// 헬스 체크
+// 간단 헬스 체크
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "Nano Banana proxy is running",
-    hasFalKey: !!FAL_KEY,
+    service: "nano-banana-proxy",
+    message: "FotoD8 Nano Banana proxy is running.",
   });
 });
 
-/**
- * 해상도 힌트를 Fal이 허용하는 값(1K/2K/4K)으로 정규화
- */
-function normalizeResolution(hint) {
-  const upper = (hint || "").toString().toUpperCase().trim();
-  if (upper === "1K" || upper === "2K" || upper === "4K") {
-    return upper;
+// 해상도 값 정규화: 어떤 값이 들어와도 1K / 2K / 4K 중 하나로 매핑
+function normalizeResolution(value) {
+  if (!value) return "1K";
+  const v = String(value).trim().toUpperCase();
+
+  if (v === "1K" || v === "2K" || v === "4K") {
+    return v;
   }
-  return "1K"; // 기본값
+
+  if (/^1/.test(v)) return "1K";
+  if (/^2/.test(v)) return "2K";
+  if (/^4/.test(v)) return "4K";
+
+  return "1K";
 }
 
-// 메인 라우트: /retouch
+// fallback용 기본 프롬프트 (흰 배경이 아니라 “자연적인 리터칭 + 선택 배경” 정도의 안전한 기본값)
+const DEFAULT_PROMPT =
+  "Retouch the image in ultra-high resolution without changing any person’s face, pose, or clothing. " +
+  "Brighten skin tones and overall colors slightly for a clean, luminous look. " +
+  "Apply a professional studio-style background suitable for a portrait. " +
+  "Keep all subjects exactly as they appear in the original photo.";
+
+// 메인 엔드포인트
 app.post("/retouch", async (req, res) => {
+  const startedAt = new Date().toISOString();
+  console.log(`[${startedAt}] /retouch called`);
+
   try {
-    if (!FAL_KEY) {
-      console.error("[ERROR] FAL_KEY missing.");
+    const {
+      imageBase64,
+      backgroundId,
+      resolutionHint,
+      promptOverride,
+      prompt,
+    } = req.body || {};
+
+    if (!FAL_API_KEY) {
+      console.error("FAL_API_KEY (또는 FAL_KEY)가 설정되어 있지 않습니다.");
       return res.status(500).json({
-        error: "Server configuration error",
-        details: "FAL_KEY missing",
+        error: "Server is not configured with FAL_API_KEY.",
       });
     }
-
-    const { imageBase64, backgroundId, resolutionHint } = req.body || {};
 
     if (!imageBase64) {
-      console.error("[ERROR] imageBase64 is missing in request body.");
-      return res.status(400).json({
-        error: "imageBase64 is required in request body",
-      });
+      console.warn("imageBase64 없음");
+      return res.status(400).json({ error: "imageBase64 is required." });
     }
 
-    // 1) backgroundId에 따른 프롬프트
-    const promptMap = {
-      studioSoft:
-        "Retouch the uploaded portrait into a soft, clean studio look with a light gradient backdrop. Do not change the person’s face, pose, expression, or clothing. Only adjust background, lighting, and overall mood.",
-      taekwondo:
-        "Create a high-energy Taekwondo Photo Day background with dynamic lighting, motion streaks, and subtle sparks. Do not change the subject’s face, pose, or uniform. Only modify the background and lighting.",
-      holiday:
-        "Transform the background into a warm holiday studio with subtle lights and seasonal mood. Keep the face, pose, and clothing as they are. Only adjust background, colors, and lighting.",
-      cleanMono:
-        "Use a simple, modern single-color studio wall background. Keep the person’s face, expression, and pose exactly the same, only cleaning up the background and lighting.",
-    };
-
-    const prompt = promptMap[backgroundId] || promptMap.studioSoft;
-
-    // 2) 해상도 정규화
+    // 해상도 정규화
     const resolution = normalizeResolution(resolutionHint);
-    console.log("[INFO] Normalized resolution:", resolution, "from hint:", resolutionHint);
+    console.log("Normalized resolution:", resolution, " (from:", resolutionHint, ")");
 
-    console.log("[INFO] Incoming /retouch request", {
-      backgroundId,
-      resolution,
-      imageLength: imageBase64.length,
-    });
+    // ✨ 프롬프트 결정 로직:
+    //  1) 프론트에서 보낸 promptOverride (구글 시트 프롬프트)
+    //  2) 프론트에서 보낸 prompt (혹시나 해서)
+    //  3) DEFAULT_PROMPT
+    let finalPrompt = DEFAULT_PROMPT;
 
-    // 3) Fal 엔드포인트
-    const falUrl = "https://fal.run/fal-ai/nano-banana-pro/edit";
+    if (typeof promptOverride === "string" && promptOverride.trim().length > 0) {
+      finalPrompt = promptOverride.trim();
+    } else if (typeof prompt === "string" && prompt.trim().length > 0) {
+      finalPrompt = prompt.trim();
+    }
 
-    /**
-     * Fal /edit 스펙에 맞는 body
-     * {
-     *   "prompt": "...",
-     *   "num_images": 1,
-     *   "aspect_ratio": "auto",
-     *   "output_format": "png",
-     *   "image_urls": ["data:...base64..."],
-     *   "resolution": "1K"
-     * }
-     */
-    const falBody = {
-      prompt: prompt,
-      num_images: 1,
-      aspect_ratio: "auto",
-      output_format: "png",
-      image_urls: [imageBase64], // Data URL(base64) 그대로 전달
-      resolution: resolution,    // "1K" / "2K" / "4K"
+    console.log("Using prompt:", finalPrompt);
+    console.log("backgroundId (for log only):", backgroundId);
+
+    // Nano Banana Pro API 요청 만들기
+    const payload = {
+      input: {
+        image_url: imageBase64, // data URL 그대로 사용
+        prompt: finalPrompt,
+        resolution,
+      },
     };
 
-    console.log("[INFO] Calling Fal endpoint:", falUrl);
-    console.log("[DEBUG] Fal request body (image hidden):", {
-      ...falBody,
-      image_urls: ["[base64-data-uri]"],
-    });
+    console.log("Sending request to fal.ai/nano-banana-pro …");
 
-    // Node 18+에서는 전역 fetch 사용 가능
-    const falRes = await fetch(falUrl, {
+    const falRes = await fetch(FAL_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Key ${FAL_KEY}`,
+        Authorization: `Key ${FAL_API_KEY}`,
       },
-      body: JSON.stringify(falBody),
+      body: JSON.stringify(payload),
     });
 
-    const falText = await falRes.text();
-
-    console.log("[INFO] Fal response status:", falRes.status);
-    console.log("[DEBUG] Fal response body:", falText);
+    const rawText = await falRes.text();
+    console.log("Fal response status:", falRes.status);
+    console.log("Fal raw response:", rawText);
 
     if (!falRes.ok) {
       return res.status(500).json({
         error: "Nano Banana Pro processing failed",
-        details: falText,
+        upstreamStatus: falRes.status,
+        details: rawText,
       });
     }
 
     let falJson = {};
     try {
-      falJson = falText ? JSON.parse(falText) : {};
+      falJson = rawText ? JSON.parse(rawText) : {};
     } catch (e) {
-      console.error("[ERROR] Failed to parse Fal JSON:", e);
+      console.error("Fal JSON parse error:", e);
       return res.status(500).json({
-        error: "Invalid JSON from Fal",
-        details: falText,
+        error: "Invalid JSON from Nano Banana Pro",
+        details: String(e),
+        raw: rawText,
       });
     }
 
-    // /edit 응답: { images: [ { url, file_name, content_type } ], ... }
-    const imageUrl =
-      falJson.images &&
-      Array.isArray(falJson.images) &&
-      falJson.images[0] &&
-      falJson.images[0].url;
+    // 응답에서 이미지 URL 찾기 (여러 형태 대비)
+    let imageUrl =
+      falJson.image_url ||
+      falJson.imageUrl ||
+      (Array.isArray(falJson.images) && falJson.images[0]?.url) ||
+      falJson.output?.[0]?.url;
 
     if (!imageUrl) {
-      console.error("[ERROR] No image URL in Fal response:", falJson);
+      console.error("No image URL in fal response:", falJson);
       return res.status(500).json({
-        error: "No image URL returned from Fal",
+        error: "Nano Banana Pro did not return an image URL.",
         details: falJson,
       });
     }
 
-    console.log("[INFO] Returning imageUrl to client:", imageUrl);
-    return res.json({ imageUrl });
+    const finishedAt = new Date().toISOString();
+    console.log(`[${finishedAt}] /retouch success. imageUrl=`, imageUrl);
+
+    return res.json({
+      ok: true,
+      imageUrl,
+      usedPrompt: finalPrompt,
+      resolution,
+      backgroundId,
+      startedAt,
+      finishedAt,
+    });
   } catch (err) {
-    console.error("[UNCAUGHT ERROR] /retouch:", err);
+    console.error("Unexpected error in /retouch:", err);
     return res.status(500).json({
-      error: "Unexpected server error in /retouch",
+      error: "Unexpected server error",
       details: String(err),
     });
   }
 });
 
-// 서버 시작
 app.listen(PORT, () => {
-  console.log(`Nano Banana proxy listening on port ${PORT}`);
+  console.log(`nano-banana-proxy listening on port ${PORT}`);
 });
