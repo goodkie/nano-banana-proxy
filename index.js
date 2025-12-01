@@ -97,18 +97,17 @@ app.post("/retouch", async (req, res) => {
     console.log("Using prompt:", finalPrompt);
     console.log("backgroundId (for log only):", backgroundId);
 
-    // Nano Banana Pro API 요청
+    // 🔴 여기가 핵심 수정 부분입니다.
+    // fal-ai/nano-banana-pro 는 body 최상위에 prompt / image_url / resolution 을 기대합니다.
     const payload = {
-      input: {
-        image_url: imageBase64, // data URL 그대로 사용
-        prompt: finalPrompt,
-        resolution,
-      },
+      prompt: finalPrompt,
+      image_url: imageBase64,   // data URL 그대로 사용
+      resolution,               // 1K / 2K / 4K
     };
 
-    console.log("Sending request to fal.ai/nano-banana-pro …");
+    console.log("Sending request to fal.ai/nano-banana-pro …", payload);
 
-    // ⬇ 여기서 Node 22의 글로벌 fetch 사용 (node-fetch 필요 없음)
+    // Node 18+ 글로벌 fetch 사용 (node-fetch 불필요)
     const falRes = await fetch(FAL_API_URL, {
       method: "POST",
       headers: {
