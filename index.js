@@ -7,12 +7,20 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /**
- * ✅ Nano Banana "Image to Image" 편집용 엔드포인트
- *  - fal-ai/nano-banana/edit
- *  - 입력 스키마: { prompt, image_urls: [...], num_images, aspect_ratio, output_format, ... }
- *    (Fal 공식 문서 기준)
+ * ✅ Nano Banana Pro Image-to-Image(EDIT) 엔드포인트
+ *  - Model ID: fal-ai/nano-banana-pro/edit
+ *  - HTTP 엔드포인트: https://fal.run/fal-ai/nano-banana-pro/edit
+ *  - 스키마(입력):
+ *    {
+ *      "prompt": "…",                      // required
+ *      "num_images": 1,
+ *      "aspect_ratio": "auto",
+ *      "output_format": "png",
+ *      "image_urls": ["data:image/..."],   // required (배경/편집용 원본 이미지들)
+ *      "resolution": "1K"                  // "1K" | "2K" | "4K"
+ *    }
  */
-const FAL_API_URL = "https://fal.run/fal-ai/nano-banana/edit";
+const FAL_API_URL = "https://fal.run/fal-ai/nano-banana-pro/edit";
 const FAL_API_KEY = process.env.FAL_KEY || process.env.FAL_API_KEY;
 
 // CORS & JSON 설정
@@ -25,7 +33,7 @@ app.use(
 );
 app.use(express.json({ limit: "10mb" }));
 
-// 간단 헬스 체크
+// 헬스 체크
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -34,19 +42,21 @@ app.get("/", (req, res) => {
   });
 });
 
-// (참고용) 해상도 정규화 – 현재 /edit 스키마에는 resolution 필드가 없으므로 Fal API에는 보내지 않음
+// 해상도 값 정규화: 어떤 값이 들어와도 1K / 2K / 4K 중 하나로 매핑
 function normalizeResolution(value) {
   if (!value) return "1K";
   const v = String(value).trim().toUpperCase();
 
   if (v === "1K" || v === "2K" || v === "4K") return v;
+
   if (/^1/.test(v)) return "1K";
   if (/^2/.test(v)) return "2K";
   if (/^4/.test(v)) return "4K";
+
   return "1K";
 }
 
-// fallback용 기본 프롬프트
+// fallback용 기본 프롬프트 (프롬프트 미선택시 사용)
 const DEFAULT_PROMPT =
   "Retouch the image in ultra-high resolution without changing any person’s face, pose, or clothing. " +
   "Brighten skin tones and overall colors slightly for a clean, luminous look. " +
@@ -60,14 +70,14 @@ app.post("/retouch", async (req, res) => {
 
   try {
     const {
-      imageBase64,   // data:image/jpeg;base64,.... 형태
-      backgroundId,  // 어떤 프롬프트를 썼는지 추적용
+      imageBase64,   // data:image/jpeg;base64,...  형식
+      backgroundId,  // 어떤 프롬프트(백그라운드) 선택했는지 추적용
       resolutionHint,
       promptOverride,
       prompt,
     } = req.body || {};
 
-    // 1) 키 확인
+    // 1) API 키 확인
     if (!FAL_API_KEY) {
       console.error("FAL_API_KEY (또는 FAL_KEY)가 설정되어 있지 않습니다.");
       return res.status(500).json({
@@ -81,19 +91,19 @@ app.post("/retouch", async (req, res) => {
       return res.status(400).json({ error: "imageBase64 is required." });
     }
 
-    // 3) 해상도 힌트는 내부 로그만 (Fal /edit 스키마에는 없음)
+    // 3) 해상도 정규화 (Fal에 그대로 보냄)
     const resolution = normalizeResolution(resolutionHint);
     console.log(
-      "Resolution hint (normalized for log only):",
+      "Normalized resolution:",
       resolution,
       "(from:",
       resolutionHint,
       ")"
     );
 
-    // 4) 최종 프롬프트 결정
-    //    1) promptOverride (구글 시트에서 읽어온 백그라운드 프롬프트)
-    //    2) prompt (프런트에서 직접 보낸 프롬프트)
+    // 4) 최종 프롬프트 결정 순서:
+    //    1) promptOverride (구글 시트에서 가져온 백그라운드 프롬프트)
+    //    2) prompt (프론트에서 직접 보낸 프롬프트)
     //    3) DEFAULT_PROMPT
     let finalPrompt = DEFAULT_PROMPT;
 
@@ -107,20 +117,14 @@ app.post("/retouch", async (req, res) => {
     console.log("backgroundId (for log only):", backgroundId);
 
     /**
-     * 5) Fal Nano Banana EDIT API 요청
+     * 5) Fal Nano Banana Pro EDIT API 요청
      *
-     *  🔹 Fal 공식 스키마 (https://fal.run/fal-ai/nano-banana/edit):
+     *  - 공식 스키마: https://fal.ai/models/fal-ai/nano-banana-pro/edit/api
+     *  - 필수 필드: prompt (string), image_urls (string 배열)
+     *  - resolution: "1K" | "2K" | "4K"
      *
-     *    {
-     *      "prompt": "…",
-     *      "num_images": 1,
-     *      "aspect_ratio": "auto",
-     *      "output_format": "png",
-     *      "image_urls": ["<URL 또는 data:image/...>"]
-     *    }
-     *
-     *  🔹 여기서는 Wix에서 올라온 data URL (imageBase64)을 그대로 image_urls 에 넣습니다.
-     *  🔹 Fal 문서에 따르면 이 필드는 Base64 data URI도 허용합니다.
+     *  ⛔ sync_mode 는 넣지 않습니다.
+     *     (true 로 두면 Request History 에 안 남아서 디버깅이 힘듦)
      */
 
     const payload = {
@@ -128,11 +132,16 @@ app.post("/retouch", async (req, res) => {
       num_images: 1,
       aspect_ratio: "auto",
       output_format: "png",
-      sync_mode: true, // 결과를 즉시 반환받기 위함
-      image_urls: [imageBase64], // ⭐ 업로드된 원본 사진을 그대로 전달
+      image_urls: [imageBase64], // ✅ 업로드된 이미지를 반드시 사용
+      resolution,                // ✅ 1K / 2K / 4K
     };
 
-    console.log("Sending request to fal-ai/nano-banana/edit …");
+    console.log("Sending request to fal-ai/nano-banana-pro/edit …");
+    console.log("Payload (trimmed prompt):", {
+      ...payload,
+      prompt: payload.prompt.slice(0, 100) + (payload.prompt.length > 100 ? "..." : ""),
+      image_urls_count: payload.image_urls.length,
+    });
 
     const falRes = await fetch(FAL_API_URL, {
       method: "POST",
@@ -148,9 +157,9 @@ app.post("/retouch", async (req, res) => {
     console.log("Fal raw response:", rawText);
 
     if (!falRes.ok) {
-      // Fal이 4xx/5xx를 반환한 경우
+      // Fal이 4xx/5xx 반환 시
       return res.status(500).json({
-        error: "Nano Banana Edit processing failed",
+        error: "Nano Banana Pro Edit processing failed",
         upstreamStatus: falRes.status,
         details: rawText,
       });
@@ -162,14 +171,14 @@ app.post("/retouch", async (req, res) => {
     } catch (e) {
       console.error("Fal JSON parse error:", e);
       return res.status(500).json({
-        error: "Invalid JSON from Nano Banana Edit",
+        error: "Invalid JSON from Nano Banana Pro Edit",
         details: String(e),
         raw: rawText,
       });
     }
 
-    // 6) 응답에서 최종 이미지 URL 찾기
-    //    공식 예시: { images: [{ url, ... }], description: "" }
+    // 6) 응답에서 최종 이미지 URL 추출
+    //    공식 스키마: { images: [{ url, ... }], description: "" }
     let imageUrl =
       (Array.isArray(falJson.images) && falJson.images[0]?.url) ||
       falJson.image_url ||
@@ -179,19 +188,19 @@ app.post("/retouch", async (req, res) => {
     if (!imageUrl) {
       console.error("No image URL in fal response:", falJson);
       return res.status(500).json({
-        error: "Nano Banana Edit did not return an image URL.",
+        error: "Nano Banana Pro Edit did not return an image URL.",
         details: falJson,
       });
     }
 
     const finishedAt = new Date().toISOString();
-    console.log(`[${finishedAt}] /retouch success. imageUrl=`, imageUrl);
+    console.log(`[${finishedAt}] /retouch success. imageUrl =`, imageUrl);
 
     return res.json({
       ok: true,
       imageUrl,
       usedPrompt: finalPrompt,
-      resolutionHint: resolution, // 참고용 echo
+      resolution,
       backgroundId,
       startedAt,
       finishedAt,
@@ -206,5 +215,5 @@ app.post("/retouch", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`nano-banana EDIT proxy listening on port ${PORT}`);
+  console.log(`nano-banana-pro EDIT proxy listening on port ${PORT}`);
 });
