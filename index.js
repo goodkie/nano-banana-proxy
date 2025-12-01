@@ -1,9 +1,7 @@
-// index.js (CommonJS 버전)
-// ※ package.json 에 "type": "module" 이 들어있으면 제거해주세요.
+// index.js (CommonJS, Node 18+ 내장 fetch 사용)
 
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -47,7 +45,7 @@ function normalizeResolution(value) {
   return "1K";
 }
 
-// fallback용 기본 프롬프트 (흰 배경이 아니라 “자연적인 리터칭 + 선택 배경” 정도의 안전한 기본값)
+// fallback용 기본 프롬프트
 const DEFAULT_PROMPT =
   "Retouch the image in ultra-high resolution without changing any person’s face, pose, or clothing. " +
   "Brighten skin tones and overall colors slightly for a clean, luminous look. " +
@@ -86,7 +84,7 @@ app.post("/retouch", async (req, res) => {
 
     // ✨ 프롬프트 결정 로직:
     //  1) 프론트에서 보낸 promptOverride (구글 시트 프롬프트)
-    //  2) 프론트에서 보낸 prompt (혹시나 해서)
+    //  2) 프론트에서 보낸 prompt
     //  3) DEFAULT_PROMPT
     let finalPrompt = DEFAULT_PROMPT;
 
@@ -99,7 +97,7 @@ app.post("/retouch", async (req, res) => {
     console.log("Using prompt:", finalPrompt);
     console.log("backgroundId (for log only):", backgroundId);
 
-    // Nano Banana Pro API 요청 만들기
+    // Nano Banana Pro API 요청
     const payload = {
       input: {
         image_url: imageBase64, // data URL 그대로 사용
@@ -110,6 +108,7 @@ app.post("/retouch", async (req, res) => {
 
     console.log("Sending request to fal.ai/nano-banana-pro …");
 
+    // ⬇ 여기서 Node 22의 글로벌 fetch 사용 (node-fetch 필요 없음)
     const falRes = await fetch(FAL_API_URL, {
       method: "POST",
       headers: {
@@ -143,7 +142,7 @@ app.post("/retouch", async (req, res) => {
       });
     }
 
-    // 응답에서 이미지 URL 찾기 (여러 형태 대비)
+    // 응답에서 이미지 URL 찾기
     let imageUrl =
       falJson.image_url ||
       falJson.imageUrl ||
